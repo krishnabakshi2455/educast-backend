@@ -28,7 +28,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # Only copy what's needed to run — no dev dependencies, no source files
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY package.json pnpm-lock.yaml .npmrc ./
 RUN pnpm install --frozen-lockfile --prod
 
 # Copy compiled output and Prisma files from the build stage
