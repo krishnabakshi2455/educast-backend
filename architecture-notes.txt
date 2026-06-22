@@ -1,0 +1,228 @@
+# EduRotor v2 — Architecture Notes
+
+## 1. Authentication & RBAC Flow
+
+### JWT Strategy
+- Access tokens (15min TTL) signed with JWT_SECRET
+- Refresh tokens (7d TTL) signed with JWT_REFRESH_SECRET and stored in the database
+- On every refresh: old token is deleted and a new pair is issued (rotation)
+- On logout: refresh token is deleted from the database
+
+### RBAC Enforcement
+Three roles: PRINCIPAL | TEACHER | STUDENT
+
+Middleware chain for protected routes:
+  Request → authenticate() → authorize(...roles) → Controller
+
+- authenticate(): extracts Bearer token, verifies JWT, attaches req.user
+- authorize(...roles): checks req.user.role against allowed roles, throws 403 if mismatch
+
+Role permission matrix:
+  Action                        | PRINCIPAL | TEACHER | STUDENT
+  ------------------------------|-----------|---------|--------
+  Create/manage schools         |    YES    |   NO    |   NO
+  Create/manage classes         |    YES    |   NO    |   NO
+  Assign teachers to classes    |    YES    |   NO    |   NO
+  Assign students to classes    |    YES    |   NO    |   NO
+  Upload content                |    NO     |   YES   |   NO
+  View own content              |    NO     |   YES   |   NO
+  Approve/reject content        |    YES    |   NO    |   NO
+  View all content              |    YES    |   NO    |   NO
+  View assigned class content   |    NO     |   NO    |   YES
+  View live content (public)    |    YES    |   YES   |   YES
+
+---
+
+## 2. School & Class System Design
+
+### Hierarchy
+  School (created by Principal)
+    └── Class (created by Principal, belongs to School)
+          ├── ClassAssignment (Teacher assigned to Class by Principal)
+          └── StudentAssignment (Student assigned to Class by Principal)
+
+### Key Rules
+- A principal can manage only their own schools
+- A teacher can only upload content to classes they are assigned to
+- A student can only view content from classes they are assigned to
+- Class names are unique per subject per school (unique constraint)
+
+---
+
+## 3. Upload Handling
+
+### Supported File Types
+  Type       | Extensions                        | Max Size
+  -----------|-----------------------------------|----------
+  IMAGE      | jpg, jpeg, png, gif, webp         | 10MB
+  PDF        | pdf                               | 20MB
+  VIDEO      | mp4, webm, ogg, mov               | 500MB
+  DOCUMENT   | doc, docx, ppt, pptx              | 20MB
+
+### Multer Pipeline
+  Incoming request
+    -> fileFilter() — MIME type whitelist check
+    -> storage destination (local disk OR Cloudflare R2 via multer-s3)
+    -> size check in service layer (per file type limit)
+    -> metadata saved to PostgreSQL
+
+### Storage Backends
+  STORAGE_TYPE=local -> files saved to /uploads directory, served via Express static
+  STORAGE_TYPE=s3    -> files uploaded to Cloudflare R2 bucket via @aws-sdk/client-s3
+                        file key pattern: uploads/{uuid}{ext}
+                        public URL: R2_PUBLIC_URL/{key}
+
+### On Render/Koyeb (ephemeral filesystem)
+  Always use STORAGE_TYPE=s3 in production to avoid file loss on redeploy.
+
+---
+
+## 4. Approval Workflow
+
+Content lifecycle:
+  UPLOADED -> PENDING (auto on upload)
+           -> APPROVED (Principal action)
+           -> REJECTED (Principal action, reason required)
+
+Rules:
+- Only PENDING content can be approved or rejected
+- Rejection requires a non-empty reason stored in rejection_reason
+- On approval/rejection, Redis cache for that teacher's live feed is invalidated
+- Teachers can view rejection_reason for their content
+- Teachers can delete only PENDING or REJECTED content (not APPROVED)
+
+---
+
+## 5. Scheduling / Rotation Logic (CORE)
+
+### Algorithm
+For a given teacher and optional subject filter:
+
+1. Fetch all APPROVED content where:
+   - uploadedBy = teacherId
+   - startTime <= now (or startTime is null)
+   - endTime >= now (or endTime is null)
+
+2. Group by subject (case-insensitive)
+
+3. For each subject group:
+   a. Sort items by createdAt ASC (stable rotation order)
+   b. totalCycleMs = sum of all (rotationDuration x 60000)
+   c. elapsedMs = (Date.now() - 0) % totalCycleMs
+      (Unix epoch 0 as fixed reference — no external state needed)
+   d. Walk through items, accumulating durations
+   e. Active item = item whose slot contains elapsedMs
+
+4. Calculate currentSlotEndsAt = now + (slotMs - timeIntoCurrentSlot)
+   so clients know when to refresh
+
+### Properties
+- Stateless: no cron jobs, no background threads
+- Deterministic: given the same timestamp, always returns the same item
+- Self-healing: adding/removing content updates rotation naturally on next request
+- Cacheable: results cached in Redis for 30 seconds
+
+### Edge Cases
+  No approved content            -> return [] with "No content available"
+  Content outside time window    -> excluded from rotation
+  Invalid/unknown teacherId      -> return [] with "No content available"
+  Single item per subject        -> always that item (no rotation)
+
+---
+
+## 6. Database Design Decisions
+
+### Why UUID primary keys
+- Safe for distributed systems, no sequential ID exposure in URLs
+
+### Key relationships
+  users (1) --< (M) refresh_tokens         [token rotation]
+  users (1) --< (M) schools                [principal owns schools]
+  schools (1) --< (M) classes              [cascade delete]
+  classes (M) >--< (M) users/teachers      [via class_assignments]
+  classes (M) >--< (M) users/students      [via student_assignments]
+  classes (1) --< (M) content              [optional]
+  users (1) --< (M) content (uploader)
+  users (1) --< (M) content (approver)
+
+---
+
+## 7. Folder Structure
+
+  src/
+  ├── config/         — env, database, redis, storage
+  ├── middlewares/    — auth, errorHandler, rateLimiter, upload
+  ├── modules/
+  │   ├── auth/       — register, login, refresh, logout
+  │   ├── users/      — user lookup
+  │   ├── schools/    — school CRUD (Principal only)
+  │   ├── classes/    — class CRUD + assignments
+  │   ├── content/    — upload, list, delete, student feed
+  │   ├── approval/   — pending queue, approve, reject
+  │   ├── scheduling/ — rotation engine + public live endpoint
+  │   └── analytics/  — dashboard stats per role
+  ├── prisma/         — seed.ts
+  └── utils/          — errors, logger, response helpers
+
+---
+
+## 8. Scalability Approach
+
+### Redis Caching
+  - Live content: 30s TTL
+  - Analytics: 60-120s TTL
+  - Invalidated on: upload, approval, rejection, assignment changes
+  - Graceful degradation if Redis is unavailable
+
+### Rate Limiting
+  - Auth endpoints: 10 req/15min
+  - Public live API: 60 req/min
+  - General API: 100 req/min (configurable)
+
+### Horizontal Scaling
+  - No in-memory state
+  - Stateless JWT
+  - File storage in Cloudflare R2 (shared across instances)
+  - Multiple instances behind a load balancer
+
+---
+
+## v3 UPDATE — School-Scoped Multi-Tenancy
+
+### What changed
+- Principal can own MULTIPLE schools, each with a unique generated School ID
+  (schoolCode, e.g. "SCH-7F3K9A").
+- User uniqueness is (email, schoolId) instead of email alone — same email
+  can exist as a fresh, separate account in a different school.
+- ALL THREE roles require School ID at login, not just identifying info.
+  Students additionally confirm classNumber + section as a verification layer.
+- Subject entity REMOVED. Subject now lives on ClassAssignment (the link
+  between a Teacher and a Class-section) — a class can have many teachers,
+  each teaching a different subject; a teacher can teach multiple classes.
+- Class model simplified: classNumber (1-12) + section (A, B, C...) replace
+  the old free-text name/subject fields. Generated in bulk via
+  POST /schools/:id/classes/setup using numberOfClasses x numberOfSections.
+- Student now has a direct classId field (one class only) instead of a
+  many-to-many StudentAssignment join table — a student belongs to exactly
+  one class-section.
+- Onboarding is now a first step, not a regular dashboard action: Principal
+  either creates a new school (POST /auth/schools/register, no School ID
+  needed) or logs back into an existing one they own (School ID required).
+
+### Why
+This reflects how real schools work: one school, one set of fixed-numbered
+classes with lettered sections, and subjects taught by specific teachers to
+specific class-sections rather than a single subject per class. School-scoping
+also makes the platform genuinely multi-tenant — data from one school is never
+visible to another, even if a Principal happens to manage several schools.
+
+### Database changes
+- School: added unique schoolCode field
+- User: added schoolId (required) and classId (optional, students only);
+  unique constraint changed from [email] to [email, schoolId]
+- Class: replaced name + subject fields with classNumber + section;
+  unique constraint changed to [classNumber, section, schoolId]
+- ClassAssignment: added subject field; unique constraint changed to
+  [classId, teacherId, subject] (allows same teacher + class for different
+  subjects)
+- StudentAssignment table REMOVED entirely — replaced by User.classId

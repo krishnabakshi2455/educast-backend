@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+.git
+.gitignore
+uploads
+logs
+*.log
+README.md
+architecture-notes.txt
+.npmrc

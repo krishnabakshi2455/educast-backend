@@ -1,0 +1,159 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PRINCIPAL
+  TEACHER
+  STUDENT
+}
+
+enum ContentStatus {
+  UPLOADED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum FileType {
+  IMAGE
+  PDF
+  VIDEO
+  DOCUMENT
+}
+
+// ─── School ───────────────────────────────────────────────────────────────────
+// A Principal can own multiple schools. Each school has a human-facing unique
+// schoolCode (used at login by every role) separate from its internal UUID.
+model School {
+  id         String   @id @default(uuid())
+  schoolCode String   @unique @map("school_code") // e.g. "SCH-7F3K9A" — given to all users for login
+  name       String
+  address    String?
+  phone      String?
+  email      String?
+  principalId String?  @map("principal_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  principal User?    @relation("PrincipalSchools", fields: [principalId], references: [id])
+  classes   Class[]
+  users     User[]  @relation("SchoolUsers")
+
+  @@map("schools")
+}
+
+// ─── User ─────────────────────────────────────────────────────────────────────
+// email is unique per school, not globally — (email, schoolId) is the real key.
+// A Principal who owns multiple schools has one User row per school (re-registers
+// per school with the same or different email; schoolId scopes the row).
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String
+  passwordHash String   @map("password_hash")
+  role         Role
+  schoolId     String   @map("school_id")
+  classId      String?  @map("class_id") // Students only — their single assigned class-section
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  school               School              @relation("SchoolUsers", fields: [schoolId], references: [id], onDelete: Cascade)
+  studentClass         Class?              @relation("StudentClass", fields: [classId], references: [id])
+
+  refreshTokens        RefreshToken[]
+  uploadedContent      Content[]           @relation("ContentUploader")
+  approvedContent      Content[]           @relation("ContentApprover")
+  teacherAssignments   ClassAssignment[]   @relation("TeacherAssignments")
+  managedSchools       School[]            @relation("PrincipalSchools")
+
+  @@unique([email, schoolId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+// ─── Class ────────────────────────────────────────────────────────────────────
+// A class-section combination, e.g. classNumber=1, section="A" → "1-A".
+// No subject here — subject lives on ClassAssignment (a teacher teaching a
+// specific subject to this class-section).
+model Class {
+  id          String   @id @default(uuid())
+  classNumber Int      @map("class_number") // 1–12
+  section     String   // "A", "B", "C"...
+  schoolId    String   @map("school_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  school             School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  teacherAssignments ClassAssignment[]
+  students           User[]              @relation("StudentClass")
+  content            Content[]
+
+  @@unique([classNumber, section, schoolId])
+  @@map("classes")
+}
+
+// ─── ClassAssignment ──────────────────────────────────────────────────────────
+// Links a Teacher to a Class-section AND the subject they teach there.
+// One teacher can be assigned to many class-sections; the same class-section
+// can have many teachers (each teaching a different subject).
+model ClassAssignment {
+  id        String   @id @default(uuid())
+  classId   String   @map("class_id")
+  teacherId String   @map("teacher_id")
+  subject   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  class   Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacher User  @relation("TeacherAssignments", fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, teacherId, subject])
+  @@map("class_assignments")
+}
+
+// ─── Content ──────────────────────────────────────────────────────────────────
+model Content {
+  id               String        @id @default(uuid())
+  title            String
+  description      String?
+  subject          String
+  classId          String?       @map("class_id")
+  fileUrl          String        @map("file_url")
+  filePath         String?       @map("file_path")
+  fileType         FileType      @map("file_type")
+  fileSize         Int           @map("file_size")
+  originalName     String        @map("original_name")
+  mimeType         String        @map("mime_type")
+  uploadedBy       String        @map("uploaded_by")
+  status           ContentStatus @default(PENDING)
+  rejectionReason  String?       @map("rejection_reason")
+  approvedBy       String?       @map("approved_by")
+  approvedAt       DateTime?     @map("approved_at")
+  startTime        DateTime?     @map("start_time")
+  endTime          DateTime?     @map("end_time")
+  rotationDuration Int           @default(5) @map("rotation_duration")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  uploader User   @relation("ContentUploader", fields: [uploadedBy], references: [id])
+  approver User?  @relation("ContentApprover", fields: [approvedBy], references: [id])
+  class    Class? @relation(fields: [classId], references: [id])
+
+  @@map("content")
+}

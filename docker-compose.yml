@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '3000:3000'
+    env_file:
+      - .env
+    restart: unless-stopped
+
+# NOTE: No database service is defined here.
+# This project uses Neon (managed PostgreSQL) — set DATABASE_URL in your .env
+# to your Neon connection string. Docker only packages the Node.js backend.
+#
+# Similarly, Redis is provided by Upstash — set REDIS_URL in your .env.
+# No local Redis container is needed.
