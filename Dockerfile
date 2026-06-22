@@ -35,7 +35,6 @@ RUN pnpm install --frozen-lockfile --prod
 # Copy compiled output and Prisma files from the build stage
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 
 # Create uploads directory (only used if STORAGE_TYPE=local)
 RUN mkdir -p uploads logs
