@@ -1,6 +1,9 @@
 # ─── Stage 1: Build ──────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
 
+# Prisma engines need OpenSSL on Alpine
+RUN apk add --no-cache openssl
+
 # Enable pnpm
 RUN corepack enable && corepack prepare pnpm@9.0.0 --activate
 
@@ -21,6 +24,9 @@ RUN pnpm run build
 
 # ─── Stage 2: Production runtime ───────────────────────────────────────────────
 FROM node:20-alpine AS production
+
+# Prisma engines need OpenSSL on Alpine
+RUN apk add --no-cache openssl
 
 RUN corepack enable && corepack prepare pnpm@9.0.0 --activate
 
