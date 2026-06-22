@@ -8,10 +8,10 @@ WORKDIR /app
 
 # Install dependencies (cached unless lockfile changes)
 COPY package.json pnpm-lock.yaml .npmrc ./
+COPY prisma ./prisma
 RUN pnpm install --frozen-lockfile
 
 # Copy source and Prisma schema
-COPY prisma ./prisma
 COPY tsconfig.json ./
 COPY src ./src
 
