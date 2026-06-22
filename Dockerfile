@@ -9,7 +9,7 @@ WORKDIR /app
 # Install dependencies (cached unless lockfile changes)
 COPY package.json pnpm-lock.yaml .npmrc ./
 COPY prisma ./prisma
-RUN pnpm install --frozen-lockfile --prod
+RUN pnpm install --frozen-lockfile
 
 # Copy source and Prisma schema
 COPY tsconfig.json ./
@@ -29,6 +29,7 @@ ENV NODE_ENV=production
 
 # Only copy what's needed to run — no dev dependencies, no source files
 COPY package.json pnpm-lock.yaml .npmrc ./
+COPY prisma ./prisma
 RUN pnpm install --frozen-lockfile --prod
 
 # Copy compiled output and Prisma files from the build stage
